@@ -29,9 +29,8 @@ from pathlib import Path
 
 def main() -> None:
     seed_str = os.environ.get("VARIANT_SEED", "0")
-    seed = int(seed_str, 0)   # accepts "42" or "0xDEAD"
+    seed = int(seed_str, 0)
 
-    # Parse arguments:  divcc <src_dir> -o <output>
     args = sys.argv[1:]
     if len(args) < 3 or args[-2] != "-o":
         print("Usage: VARIANT_SEED=<n> python3 divcc <src_dir> -o <output>")
@@ -52,9 +51,6 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
 
-        # ------------------------------------------------------------------
-        # Step 1 — compile every .c to its own .o
-        # ------------------------------------------------------------------
         obj_map: dict[Path, Path] = {}
         for src in sources:
             obj = tmp / (src.stem + ".o")
@@ -65,9 +61,6 @@ def main() -> None:
                 sys.exit(ret.returncode)
             obj_map[src] = obj
 
-        # ------------------------------------------------------------------
-        # Step 2 — shuffle non-main objects with the seed; main goes last
-        # ------------------------------------------------------------------
         rng = random.Random(seed)
         shuffled = non_main[:]
         rng.shuffle(shuffled)
@@ -75,9 +68,6 @@ def main() -> None:
 
         print(f"  seed {seed:#06x} → link order: {[s.stem for s in link_order]}")
 
-        # ------------------------------------------------------------------
-        # Step 3 — link in shuffled order
-        # ------------------------------------------------------------------
         obj_files = [str(obj_map[s]) for s in link_order]
         ret = subprocess.run(["clang"] + obj_files + ["-o", out_file])
         sys.exit(ret.returncode)

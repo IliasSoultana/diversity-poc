@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""
+divcc — diversity compiler wrapper
+
+Produces seed-unique binaries by compiling each source file in src/ to its own
+object file, then linking them in a seed-determined random order.  The linker
+places object files sequentially in the text segment, so a different link order
+means every function lands at a different address.
+
+Every build is functionally identical — same source, same behaviour — but each
+seed produces a different internal layout so an exploit crafted for one binary
+does not transfer to another.
+
+Usage:
+    VARIANT_SEED=0xb2e1  python3 divcc src/ -o node_01
+    VARIANT_SEED=0x61a7  python3 divcc src/ -o node_02
+
+Environment:
+    VARIANT_SEED   Integer seed (decimal or 0x-hex).  Default: 0.
+"""
+
+import os
+import random
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+def main() -> None:
+    seed_str = os.environ.get("VARIANT_SEED", "0")
+    seed = int(seed_str, 0)   # accepts "42" or "0xDEAD"
+
+    # Parse arguments:  divcc <src_dir> -o <output>
+    args = sys.argv[1:]
+    if len(args) < 3 or args[-2] != "-o":
+        print("Usage: VARIANT_SEED=<n> python3 divcc <src_dir> -o <output>")
+        sys.exit(1)
+
+    src_dir = Path(args[0])
+    out_file = args[-1]
+
+    # Collect .c files — main.c is always linked last so _main resolves cleanly
+    sources = sorted(src_dir.glob("*.c"))
+    non_main = [s for s in sources if s.name != "main.c"]
+    main_src = [s for s in sources if s.name == "main.c"]
+
+    if not main_src:
+        print("error: main.c not found in", src_dir)
+        sys.exit(1)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+
+        # ------------------------------------------------------------------
+        # Step 1 — compile every .c to its own .o
+        # ------------------------------------------------------------------
+        obj_map: dict[Path, Path] = {}
+        for src in sources:
+            obj = tmp / (src.stem + ".o")
+            ret = subprocess.run(
+                ["clang", "-O1", "-I", str(src_dir), "-c", str(src), "-o", str(obj)]
+            )
+            if ret.returncode != 0:
+                sys.exit(ret.returncode)
+            obj_map[src] = obj
+
+        # ------------------------------------------------------------------
+        # Step 2 — shuffle non-main objects with the seed; main goes last
+        # ------------------------------------------------------------------
+        rng = random.Random(seed)
+        shuffled = non_main[:]
+        rng.shuffle(shuffled)
+        link_order = shuffled + main_src
+
+        print(f"  seed {seed:#06x} → link order: {[s.stem for s in link_order]}")
+
+        # ------------------------------------------------------------------
+        # Step 3 — link in shuffled order
+        # ------------------------------------------------------------------
+        obj_files = [str(obj_map[s]) for s in link_order]
+        ret = subprocess.run(["clang"] + obj_files + ["-o", out_file])
+        sys.exit(ret.returncode)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,5 +1,7 @@
 # diversity-poc
 
+[![CI](https://github.com/IliasSoultana/diversity-poc/actions/workflows/ci.yml/badge.svg)](https://github.com/IliasSoultana/diversity-poc/actions/workflows/ci.yml)
+
 A proof-of-concept demonstrating compiler-level software diversity.
 
 Each build is **functionally identical** — same source, same output — but
@@ -69,15 +71,46 @@ bash demo.sh
 | `demo.sh` | Builds two nodes and runs the comparison |
 | `src/` | Demo firmware split into one file per function |
 
-## Limitations
+## What this does not protect against
 
-This PoC uses **link-order shuffling**, the simplest form of software
-diversity.  Production systems use additional techniques such as:
+Link-order shuffling is the coarsest form of software diversity, and it is
+worth being precise about where it stops helping:
 
-- Instruction-level scheduling variation
-- Register allocation randomisation  
-- Dead-code insertion and padding
-- Randomised stack frame layout
+- **It moves objects, not instructions.** Function bodies are byte-identical
+  across variants. Any gadget inside a function keeps its offset relative to
+  that function's entry, so an attacker who learns one address learns every
+  address within the same object.
+- **One leak collapses it.** The whole benefit rests on the attacker not
+  knowing the layout. A single info-leak primitive that discloses a function
+  pointer re-anchors the rest, and diversity buys nothing further.
+- **It does not touch control flow, constants or data layout.** Signatures
+  used for reverse engineering — string tables, magic values, call graph
+  shape — are unchanged, so identifying the firmware is no harder.
+- **Nothing is hardened.** This changes where code sits, not whether it is
+  exploitable. A buffer overflow remains a buffer overflow.
+- **It needs the source.** This acts inside the toolchain, so it cannot be
+  applied to a vendored blob or a binary you cannot rebuild — which is
+  precisely the case in much of the embedded supply chain.
+
+Production systems layer finer-grained techniques on top: instruction
+scheduling variation, register allocation randomisation, dead-code insertion
+and padding, randomised stack frame layout — and, where source is unavailable,
+binary rewriting rather than a compiler wrapper.
 
 The principle demonstrated here is the same: same source, unique binary,
 per-device seed.
+
+## Properties under test
+
+CI builds three variants on every push and asserts all three properties that
+make this worth doing at all:
+
+| Property | Why it matters | How it is checked |
+|---|---|---|
+| **Functional equivalence** | A variant that behaves differently is a miscompile, not a mitigation | `node_01` and `node_02` must produce byte-identical output |
+| **Layout divergence** | The security property itself | `compare.py` must report at least 5 of 9 functions relocated |
+| **Seed determinism** | You must be able to rebuild the exact image a given unit is running | The same seed twice must relocate nothing |
+
+The third is the one that is easy to forget. Per-device randomisation is
+useless in the field if you cannot reproduce a specific device's binary when
+it crashes.

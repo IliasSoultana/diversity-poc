@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  diversity:
+    name: Verify the diversity properties
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build three variants
+        run: |
+          set -e
+          VARIANT_SEED=0xb2e1 python3 divcc src/ -o node_01
+          VARIANT_SEED=0x61a7 python3 divcc src/ -o node_02
+          VARIANT_SEED=0xb2e1 python3 divcc src/ -o node_01_rebuild
+
+      # Diversity is only useful if it changes nothing observable. A variant
+      # that behaves differently is a miscompile, not a mitigation.
+      - name: Functional equivalence
+        run: |
+          set -e
+          diff <(./node_01) <(./node_02) \
+            || { echo "::error::variants differ in behaviour"; exit 1; }
+          echo "variants behave identically"
+
+      # The actual security property: different seed, different layout.
+      - name: Layout divergence
+        run: |
+          set -e
+          python3 compare.py node_01 node_02 | tee divergence.txt
+          different=$(grep -oE '^[0-9]+' <<< "$(grep 'different addresses' divergence.txt)")
+          echo "functions relocated: $different"
+          if [ "$different" -lt 5 ]; then
+            echo "::error::only $different functions moved; diversification is not working"
+            exit 1
+          fi
+
+      # A device must be reproducible from its seed, or you cannot rebuild the
+      # exact image a given unit is running when you need to debug it.
+      - name: Seed determinism
+        run: |
+          set -e
+          python3 compare.py node_01 node_01_rebuild | tee determinism.txt
+          different=$(grep -oE '^[0-9]+' <<< "$(grep 'different addresses' determinism.txt)")
+          if [ "$different" -ne 0 ]; then
+            echo "::error::same seed produced $different relocated functions; builds are not reproducible"
+            exit 1
+          fi
+          echo "same seed reproduces the same layout"

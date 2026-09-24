@@ -184,11 +184,16 @@ def compare(a: list[Gadget], b: list[Gadget]) -> dict:
     same_address = 0
     offset_preserved = 0
     offset_changed = 0
+    # Which functions hold the gadgets that did NOT move. divcc only shuffles
+    # the objects it compiles; anything the driver links for us -- C runtime
+    # startup, PLT stubs -- keeps its place, and so do its gadgets.
+    anchored: dict[str, int] = {}
 
     for raw in shared:
         ga, gb = by_bytes_a[raw][0], by_bytes_b[raw][0]
         if ga.address == gb.address:
             same_address += 1
+            anchored[ga.symbol or "<no symbol>"] = anchored.get(ga.symbol or "<no symbol>", 0) + 1
         else:
             moved += 1
         if ga.symbol and ga.symbol == gb.symbol:
@@ -211,6 +216,9 @@ def compare(a: list[Gadget], b: list[Gadget]) -> dict:
         "offset_within_function_changed": offset_changed,
         "offset_preservation_rate": (
             round(100 * offset_preserved / attributed, 1) if attributed else None
+        ),
+        "unmoved_by_function": dict(
+            sorted(anchored.items(), key=lambda kv: -kv[1])
         ),
     }
 
@@ -235,6 +243,10 @@ def main() -> None:
           f"({result['survival_rate']}% of variant A)")
     print(f"  at a new address     {result['moved_absolute']}")
     print(f"  at the same address  {result['same_absolute_address']}")
+    if result["unmoved_by_function"]:
+        print("    these sit in code divcc does not shuffle:")
+        for sym, n in result["unmoved_by_function"].items():
+            print(f"      {sym:<28} {n}")
 
     rate = result["offset_preservation_rate"]
     if rate is not None:

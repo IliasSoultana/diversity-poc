@@ -123,3 +123,81 @@ jobs:
         run: |
           python3 gadgets.py --inventory /usr/bin/ls /bin/bash /usr/bin/ssh
           python3 validate_against_ropgadget.py /usr/bin/ls /usr/bin/ssh
+
+  rewrite:
+    name: Instruction-level rewrite runs and stays equivalent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install LLVM for Nyxstone
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev
+
+      - name: Install dependencies
+        env:
+          NYXSTONE_LLVM_PREFIX: /usr/lib/llvm-18
+        run: pip install -r requirements-gadgets.txt pytest
+
+      - name: Transform unit tests
+        run: python -m pytest tests/test_rewrite.py -q
+
+      - name: Rewrite a real binary and prove it still works
+        run: |
+          set -e
+          # A program with plenty of register-to-register arithmetic and
+          # deterministic, input-dependent output -- so a broken rewrite shows
+          # up as a wrong answer, not just a crash.
+          cat > sample.c <<'SRC'
+          #include <stdio.h>
+          #include <stdint.h>
+          static uint64_t mix(uint64_t x, uint64_t y) {
+              x ^= y; x += (y << 3); x -= (x >> 7);
+              y ^= x; y += x; return x ^ y;
+          }
+          int main(void) {
+              uint64_t a = 0x1234, b = 0x9abc, acc = 0;
+              for (int i = 0; i < 100000; i++) { acc = mix(acc + i, a); a = mix(a, b); b += i; }
+              printf("%llu\n", (unsigned long long)acc);
+              return (int)(acc & 0x7f);
+          }
+          SRC
+          sed -i 's/^          //' sample.c
+          gcc -O2 -no-pie -o original sample.c
+
+          python3 rewrite.py original -o rewritten --seed 1337
+          chmod +x rewritten
+
+          echo "byte-level difference:"
+          cmp -l original rewritten | wc -l | xargs echo "  differing bytes:"
+          if cmp -s original rewritten; then
+            echo "::error::rewrite changed nothing"; exit 1
+          fi
+
+          echo "behavioural equivalence:"
+          out_o=$(./original); rc_o=$?
+          out_r=$(./rewritten); rc_r=$?
+          echo "  original : $out_o (rc $rc_o)"
+          echo "  rewritten: $out_r (rc $rc_r)"
+          if [ "$out_o" != "$out_r" ] || [ "$rc_o" != "$rc_r" ]; then
+            echo "::error::rewritten binary does not behave identically"; exit 1
+          fi
+          echo "  identical output and exit code"
+
+      - name: Show what the rewrite did to the gadget population
+        run: |
+          set -e
+          # Instruction substitution changes bytes inside functions, which is
+          # exactly what link-order shuffling could not do. compare gadget bytes.
+          python3 gadgets.py --inventory original rewritten
+          python3 - <<'PY'
+          from gadgets import extract
+          a = {g.raw for g in extract("original")}
+          b = {g.raw for g in extract("rewritten")}
+          only_a = len(a - b)
+          print(f"distinct gadget sequences: {len(a)} original, {len(b)} rewritten")
+          print(f"sequences changed by the rewrite: {only_a}")
+          if only_a == 0:
+              print("::warning::rewrite did not alter any gadget bytes on this sample")
+          PY

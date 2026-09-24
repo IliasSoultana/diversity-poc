@@ -125,14 +125,30 @@ def rewrite(in_path: str, out_path: str, seed: int = 0, dry_run: bool = False) -
         data = bytearray(f.read())
 
     candidates = 0
-    applied = 0
     verified_equivalent = 0
+    applied = 0
+    backed_out = 0
+
+    def section_asm(blob: bytes, base: int) -> list[tuple[int, str]] | None:
+        """(address, assembly) for every instruction, or None if it will not decode."""
+        try:
+            ins = nyx.disassemble_to_instructions(list(blob), base)
+        except Exception:
+            return None
+        return [(i.address, i.assembly) for i in ins]
 
     for section in binary.sections:
         if (section.name or "") not in (".text",):
             continue
         base = section.virtual_address
         blob = bytes(section.content)
+
+        baseline = section_asm(blob, base)
+        if baseline is None:
+            continue
+
+        # Work on a mutable copy of just this section; commit to `data` at the end.
+        sect = bytearray(blob)
 
         try:
             insns = nyx.disassemble_to_instructions(list(blob), base)
@@ -146,29 +162,42 @@ def rewrite(in_path: str, out_path: str, seed: int = 0, dry_run: bool = False) -
                 continue
             candidates += 1
 
-            # Prove equivalence: the replacement must disassemble to exactly the
-            # original instruction, and be exactly as long.
+            # First gate: the replacement, decoded on its own, must mean exactly
+            # the same thing and be the same length.
             try:
                 back = nyx.disassemble_to_instructions(list(alt), insn.address)
             except Exception:
                 continue
-            if len(back) != 1 or len(alt) != len(orig):
-                continue
-            if back[0].assembly != insn.assembly:
+            if len(back) != 1 or len(alt) != len(orig) or back[0].assembly != insn.assembly:
                 continue
             verified_equivalent += 1
 
-            # A seed lets a fleet get per-device variants; seed 0 rewrites all.
+            # Per-device selection.
             if seed and rng.random() < 0.5:
                 continue
 
-            off = _vaddr_to_offset(binary, insn.address)
-            if off is None or data[off:off + len(orig)] != orig:
+            rel = insn.address - base
+            if bytes(sect[rel:rel + len(orig)]) != orig:
                 continue
 
-            if not dry_run:
-                data[off:off + len(alt)] = alt
-            applied += 1
+            # Second gate, the one the isolated check cannot give: apply the edit
+            # and require the WHOLE section to still decode to the identical
+            # instruction sequence. A linear-sweep desync -- bytes that looked
+            # like a standalone instruction but are not one in the real stream --
+            # shifts later boundaries and fails here, so it is backed out rather
+            # than silently corrupting the binary.
+            sect[rel:rel + len(alt)] = alt
+            after = section_asm(bytes(sect), base)
+            if after == baseline:
+                applied += 1
+            else:
+                sect[rel:rel + len(orig)] = orig   # revert
+                backed_out += 1
+
+        # Commit this section's surviving edits.
+        off = _vaddr_to_offset(binary, base)
+        if off is not None:
+            data[off:off + len(sect)] = sect
 
     if not dry_run:
         with open(out_path, "wb") as f:
@@ -180,6 +209,7 @@ def rewrite(in_path: str, out_path: str, seed: int = 0, dry_run: bool = False) -
         "candidates": candidates,
         "verified_equivalent": verified_equivalent,
         "applied": applied,
+        "backed_out": backed_out,
     }
 
 
@@ -199,8 +229,8 @@ def main() -> None:
     stats = rewrite(args.input, args.output or "/dev/null", args.seed, args.dry_run)
     print(f"reg-reg candidates          {stats['candidates']}")
     print(f"verified equivalent         {stats['verified_equivalent']}")
-    print(f"{'would rewrite' if args.dry_run else 'rewritten'}"
-          f"{'':15}".rstrip() + f"     {stats['applied']}")
+    print(f"backed out (desync)         {stats['backed_out']}")
+    print(f"{'would rewrite' if args.dry_run else 'rewritten':<27} {stats['applied']}")
     if not args.dry_run:
         print(f"wrote {args.output}")
 

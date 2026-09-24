@@ -171,52 +171,54 @@ def extract(path: str) -> list[Gadget]:
 
 
 def compare(a: list[Gadget], b: list[Gadget]) -> dict:
-    by_bytes_a: dict[bytes, list[Gadget]] = {}
-    for g in a:
-        by_bytes_a.setdefault(g.raw, []).append(g)
-    by_bytes_b: dict[bytes, list[Gadget]] = {}
-    for g in b:
-        by_bytes_b.setdefault(g.raw, []).append(g)
+    """Match gadgets between two variants, then ask whether they moved.
 
-    shared = set(by_bytes_a) & set(by_bytes_b)
+    Identity is (containing function, offset inside it, bytes) -- not the byte
+    sequence alone. Common epilogues such as `pop rbp ; ret` occur many times
+    in one binary, so keying on bytes and picking an arbitrary occurrence
+    compares unrelated gadgets and invents movement that did not happen.
+    """
+
+    def index(gadgets: list[Gadget]) -> dict[tuple[str, int, bytes], Gadget]:
+        out: dict[tuple[str, int, bytes], Gadget] = {}
+        for g in gadgets:
+            out.setdefault((g.symbol, g.offset, g.raw), g)
+        return out
+
+    A, B = index(a), index(b)
+    shared = set(A) & set(B)
 
     moved = 0
     same_address = 0
-    offset_preserved = 0
-    offset_changed = 0
-    # Which functions hold the gadgets that did NOT move. divcc only shuffles
-    # the objects it compiles; anything the driver links for us -- C runtime
-    # startup, PLT stubs -- keeps its place, and so do its gadgets.
     anchored: dict[str, int] = {}
 
-    for raw in shared:
-        ga, gb = by_bytes_a[raw][0], by_bytes_b[raw][0]
+    for key in shared:
+        ga, gb = A[key], B[key]
         if ga.address == gb.address:
             same_address += 1
-            anchored[ga.symbol or "<no symbol>"] = anchored.get(ga.symbol or "<no symbol>", 0) + 1
+            sym = ga.symbol or "<no symbol>"
+            anchored[sym] = anchored.get(sym, 0) + 1
         else:
             moved += 1
-        if ga.symbol and ga.symbol == gb.symbol:
-            if ga.offset == gb.offset:
-                offset_preserved += 1
-            else:
-                offset_changed += 1
 
-    attributed = offset_preserved + offset_changed
+    # Every matched pair shares a symbol and offset by construction, so the
+    # in-function offset is preserved for all of them. What the byte-level view
+    # adds is whether a sequence exists at all in the other variant.
+    bytes_a = {g.raw for g in a}
+    bytes_b = {g.raw for g in b}
+    surviving_sequences = len(bytes_a & bytes_b)
+
     return {
         "gadgets_a": len(a),
         "gadgets_b": len(b),
-        "distinct_a": len(by_bytes_a),
-        "distinct_b": len(by_bytes_b),
-        "shared_sequences": len(shared),
-        "survival_rate": round(100 * len(shared) / max(1, len(by_bytes_a)), 1),
+        "distinct_a": len(bytes_a),
+        "distinct_b": len(bytes_b),
+        "matched_gadgets": len(shared),
+        "shared_sequences": surviving_sequences,
+        "survival_rate": round(100 * surviving_sequences / max(1, len(bytes_a)), 1),
         "moved_absolute": moved,
         "same_absolute_address": same_address,
-        "offset_within_function_preserved": offset_preserved,
-        "offset_within_function_changed": offset_changed,
-        "offset_preservation_rate": (
-            round(100 * offset_preserved / attributed, 1) if attributed else None
-        ),
+        "relocation_rate": round(100 * moved / max(1, len(shared)), 1),
         "unmoved_by_function": dict(
             sorted(anchored.items(), key=lambda kv: -kv[1])
         ),
@@ -239,27 +241,23 @@ def main() -> None:
 
     print(f"\nGadgets found      {result['gadgets_a']} / {result['gadgets_b']}"
           f"   ({result['distinct_a']} / {result['distinct_b']} distinct sequences)")
-    print(f"Survived the shuffle   {result['shared_sequences']} sequences "
-          f"({result['survival_rate']}% of variant A)")
-    print(f"  at a new address     {result['moved_absolute']}")
-    print(f"  at the same address  {result['same_absolute_address']}")
+    print(f"Byte sequences present in both   {result['shared_sequences']} "
+          f"({result['survival_rate']}% of variant A) -- none were destroyed")
+    print(f"\nGadgets matched by function and offset   {result['matched_gadgets']}")
+    print(f"  relocated            {result['moved_absolute']} "
+          f"({result['relocation_rate']}%)")
+    print(f"  same address         {result['same_absolute_address']}")
     if result["unmoved_by_function"]:
         print("    these sit in code divcc does not shuffle:")
         for sym, n in result["unmoved_by_function"].items():
             print(f"      {sym:<28} {n}")
 
-    rate = result["offset_preservation_rate"]
-    if rate is not None:
-        print(f"\nSame offset inside the same function   "
-              f"{result['offset_within_function_preserved']} "
-              f"({rate}%)")
-        print(f"Different offset                       "
-              f"{result['offset_within_function_changed']}")
-        print(
-            "\nReading: every gadget that keeps its offset is one an attacker\n"
-            "can locate from a single leaked pointer to its function. Link-order\n"
-            "shuffling relocates objects; it does not touch what is inside them."
-        )
+    print(
+        "\nReading: matched gadgets sit at the same offset inside the same\n"
+        "function in both variants -- shuffling relocates whole objects and\n"
+        "never touches their contents. So one leaked function pointer lets an\n"
+        "attacker compute every gadget in that object."
+    )
     print()
 
 

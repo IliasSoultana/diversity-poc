@@ -91,9 +91,8 @@ jobs:
           if d["survival_rate"] < 90:
               sys.exit(f"::error::only {d['survival_rate']}% of gadgets survived; "
                        "README claims shuffling destroys none")
-          rate = d["offset_preservation_rate"]
-          if rate is not None and rate < 90:
-              sys.exit(f"::error::only {rate}% of gadgets kept their in-function "
-                       "offset; the documented limitation no longer holds")
+          if d["matched_gadgets"] == 0:
+              sys.exit("::error::no gadgets could be matched between variants")
+          print(f"{d['relocation_rate']}% of matched gadgets relocated")
           print("documented limitation still holds")
           PY

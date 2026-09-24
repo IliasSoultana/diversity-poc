@@ -7,27 +7,23 @@ the flattering one.  This asks the harder one: a return-oriented exploit is
 built from short instruction sequences ending in a return, so what happens to
 *those* when the link order changes?
 
-Three numbers come out, and only the third one matters:
+Two modes:
 
-  1. How many gadgets each variant contains.
-     Link-order shuffling does not add or remove code, so this should be
-     identical.  If it is not, something is wrong with the build.
+    gadgets.py BINARY_A BINARY_B      compare two variants
+    gadgets.py --inventory BINARY     count gadgets in one binary
 
-  2. How many gadget byte sequences survive in both variants.
-     Also expected to be ~100%.  Moving object files around does not rewrite
-     instructions, so every gadget still exists somewhere.
+How gadgets are found depends on the instruction encoding:
 
-  3. How many surviving gadgets keep the same offset inside their own
-     function.
-     This is the one that decides whether the mitigation is worth anything.
-     If a gadget sits at the same offset within `process_sensor` in every
-     variant, then an attacker who leaks the address of `process_sensor` on
-     one device can compute every gadget in that object, on that device.
-     Diversification then costs them one info leak, not an exploit.
+  Fixed-width ISAs (AArch64, RISC-V).  Every instruction starts on a 4-byte
+  boundary, so one linear sweep of the text section sees all of them.
 
-Usage:
-    python3 gadgets.py node_01 node_02
-    python3 gadgets.py node_01 node_02 --json
+  Variable-width ISAs (x86, x86-64).  An instruction may start at any byte, so
+  a return opcode sitting inside the immediate or displacement of a longer
+  instruction is still a real, executable return -- reachable by jumping into
+  the middle of that instruction.  A linear sweep never reports those, and on
+  x86 they are the majority of what a ROP chain is built from.  So we scan for
+  return opcodes and try decoding backwards from each one, keeping the starts
+  that decode cleanly and land exactly on the return.
 """
 
 from __future__ import annotations
@@ -48,55 +44,61 @@ except ImportError:
     sys.exit("nyxstone is required:  pip install nyxstone  (needs LLVM 15-20)")
 
 
-# How many instructions may precede the return in a gadget. Real ROP chains
-# use short sequences; anything longer tends to have side effects the attacker
-# cannot control.
+# How many instructions may precede the return. Real chains use short
+# sequences; longer ones carry side effects the attacker cannot control.
 MAX_GADGET_INSNS = 4
 
-# Instructions that end a gadget's usefulness if they appear in the middle:
-# an unconditional transfer means control never reaches the return.
-TERMINATORS = ("b ", "br ", "bl ", "blr ", "jmp", "call", "ret", "hlt", "ud2")
+# How far back to try decoding from a return byte on a variable-width ISA.
+# The longest valid x86-64 instruction is 15 bytes.
+MAX_BACKWARD_BYTES = 20
+
+# An unconditional transfer in the middle means control never reaches the
+# return, so the sequence is not usable.
+TERMINATORS = ("b ", "br ", "bl ", "blr ", "jmp", "call", "ret", "hlt", "ud2", "j")
+
+# x86 return opcodes and their encoded lengths.
+X86_RETURNS = {0xC3: 1, 0xC2: 3}
+
+TRIPLES = {
+    "aarch64": "aarch64-unknown-none",
+    "x86_64": "x86_64-unknown-none",
+    "riscv64": "riscv64-unknown-none",
+    "arm": "armv7-unknown-none",
+}
+VARIABLE_WIDTH = {"x86_64"}
 
 
 @dataclass(frozen=True)
 class Gadget:
-    address: int          # virtual address of the first instruction
-    text: str             # "mov x0, x1 ; ret"
-    raw: bytes            # the bytes, so identical gadgets compare equal
-    symbol: str           # containing function, or "" if unknown
-    offset: int           # distance from the start of that function
+    address: int
+    text: str
+    raw: bytes
+    symbol: str
+    offset: int
 
 
-def _triple(binary) -> str:
-    """Map the parsed binary's architecture to an LLVM target triple.
-
-    ELF headers expose `machine_type`, Mach-O headers `cpu_type`; the tool has
-    to read both because the demo builds native on macOS and ELF in CI.
-    """
+def _arch(binary) -> str:
     header = binary.header
     raw = getattr(header, "machine_type", None) or getattr(header, "cpu_type", None)
-    arch = str(raw).lower()
-    if "aarch64" in arch or "arm64" in arch:
-        return "aarch64-unknown-none"
-    if "x86_64" in arch or "amd64" in arch:
-        return "x86_64-unknown-none"
-    if "riscv" in arch:
-        return "riscv64-unknown-none"
-    if "arm" in arch:
-        return "armv7-unknown-none"
-    raise SystemExit(f"unsupported architecture: {arch}")
+    a = str(raw).lower()
+    if "aarch64" in a or "arm64" in a:
+        return "aarch64"
+    if "x86_64" in a or "amd64" in a:
+        return "x86_64"
+    if "riscv" in a:
+        return "riscv64"
+    if "arm" in a:
+        return "arm"
+    raise SystemExit(f"unsupported architecture: {a}")
 
 
 def _executable_sections(binary):
-    """Yield (name, virtual_address, bytes) for every executable section."""
     for section in binary.sections:
-        name = section.name or ""
-        if name in (".text", "__text"):
-            yield name, section.virtual_address, bytes(section.content)
+        if (section.name or "") in (".text", "__text"):
+            yield section.virtual_address, bytes(section.content)
 
 
 def _function_map(binary) -> list[tuple[int, str]]:
-    """Sorted (address, name) pairs, used to attribute a gadget to a function."""
     funcs = []
     for sym in binary.symbols:
         name = (sym.name or "").lstrip("_")
@@ -107,19 +109,92 @@ def _function_map(binary) -> list[tuple[int, str]]:
 
 
 def _owning_function(funcs: list[tuple[int, str]], address: int) -> tuple[str, int]:
-    """The last function starting at or before `address`."""
-    lo, hi = 0, len(funcs) - 1
-    best = None
+    lo, hi, best = 0, len(funcs) - 1, None
     while lo <= hi:
         mid = (lo + hi) // 2
         if funcs[mid][0] <= address:
-            best = funcs[mid]
-            lo = mid + 1
+            best, lo = funcs[mid], mid + 1
         else:
             hi = mid - 1
-    if best is None:
-        return "", 0
-    return best[1], address - best[0]
+    return (best[1], address - best[0]) if best else ("", 0)
+
+
+def _unusable(assemblies) -> bool:
+    return any(a.startswith(t) for a in assemblies for t in TERMINATORS)
+
+
+def _linear_gadgets(nyx, blob: bytes, base: int, funcs) -> list[Gadget]:
+    """Fixed-width ISAs: a single sweep sees every instruction."""
+    try:
+        insns = nyx.disassemble_to_instructions(list(blob), base)
+    except Exception:
+        return []
+
+    out = []
+    for i, insn in enumerate(insns):
+        if not insn.assembly.startswith("ret"):
+            continue
+        window = []
+        for j in range(i - 1, max(-1, i - 1 - MAX_GADGET_INSNS), -1):
+            if _unusable([insns[j].assembly]):
+                break
+            window.insert(0, insns[j])
+        for start in range(len(window) + 1):
+            chain = window[start:] + [insn]
+            addr = chain[0].address
+            sym, off = _owning_function(funcs, addr)
+            out.append(Gadget(
+                address=addr,
+                text=" ; ".join(c.assembly for c in chain),
+                raw=b"".join(bytes(c.bytes) for c in chain),
+                symbol=sym, offset=off,
+            ))
+    return out
+
+
+def _backward_gadgets(nyx, blob: bytes, base: int, funcs) -> list[Gadget]:
+    """Variable-width ISAs: decode backwards from every return byte."""
+    out: list[Gadget] = []
+    seen: set[tuple[int, int]] = set()
+
+    for pos, byte in enumerate(blob):
+        ret_len = X86_RETURNS.get(byte)
+        if ret_len is None or pos + ret_len > len(blob):
+            continue
+
+        for back in range(1, MAX_BACKWARD_BYTES + 1):
+            start = pos - back
+            if start < 0:
+                break
+            window = blob[start:pos + ret_len]
+            try:
+                insns = nyx.disassemble_to_instructions(list(window), base + start)
+            except Exception:
+                continue  # not a valid instruction boundary
+            if not insns:
+                continue
+
+            last = insns[-1]
+            # The decode must land exactly on the return rather than swallow it.
+            if last.address != base + pos or not last.assembly.startswith("ret"):
+                continue
+            middle = [i.assembly for i in insns[:-1]]
+            if len(middle) > MAX_GADGET_INSNS or _unusable(middle):
+                continue
+
+            key = (base + start, len(window))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            sym, off = _owning_function(funcs, base + start)
+            out.append(Gadget(
+                address=base + start,
+                text=" ; ".join(i.assembly for i in insns),
+                raw=bytes(window),
+                symbol=sym, offset=off,
+            ))
+    return out
 
 
 def extract(path: str) -> list[Gadget]:
@@ -127,86 +202,47 @@ def extract(path: str) -> list[Gadget]:
     if binary is None:
         raise SystemExit(f"could not parse {path}")
 
-    nyx = Nyxstone(_triple(binary))
+    arch = _arch(binary)
+    nyx = Nyxstone(TRIPLES[arch])
     funcs = _function_map(binary)
+    strategy = _backward_gadgets if arch in VARIABLE_WIDTH else _linear_gadgets
+
     gadgets: list[Gadget] = []
-
-    for _name, base, blob in _executable_sections(binary):
-        # Linear sweep. On fixed-width ISAs (AArch64, RISC-V) this sees every
-        # instruction. On x86 it misses gadgets that only appear when decoding
-        # from an unaligned offset -- see the limitation in the README.
-        try:
-            insns = nyx.disassemble_to_instructions(list(blob), base)
-        except Exception as exc:  # noqa: BLE001
-            raise SystemExit(f"disassembly failed for {path}: {exc}")
-
-        for i, insn in enumerate(insns):
-            if not insn.assembly.startswith("ret"):
-                continue
-
-            # Walk backwards collecting usable instructions.
-            window = []
-            for j in range(i - 1, max(-1, i - 1 - MAX_GADGET_INSNS), -1):
-                prev = insns[j].assembly
-                if any(prev.startswith(t) for t in TERMINATORS):
-                    break
-                window.insert(0, insns[j])
-
-            for start in range(len(window) + 1):
-                chain = window[start:] + [insn]
-                addr = chain[0].address
-                raw = b"".join(bytes(c.bytes) for c in chain)
-                sym, off = _owning_function(funcs, addr)
-                gadgets.append(
-                    Gadget(
-                        address=addr,
-                        text=" ; ".join(c.assembly for c in chain),
-                        raw=raw,
-                        symbol=sym,
-                        offset=off,
-                    )
-                )
-
+    for base, blob in _executable_sections(binary):
+        gadgets.extend(strategy(nyx, blob, base, funcs))
     return gadgets
 
 
 def compare(a: list[Gadget], b: list[Gadget]) -> dict:
-    """Match gadgets between two variants, then ask whether they moved.
+    """Match gadgets between variants by (function, offset, bytes).
 
-    Identity is (containing function, offset inside it, bytes) -- not the byte
-    sequence alone. Common epilogues such as `pop rbp ; ret` occur many times
-    in one binary, so keying on bytes and picking an arbitrary occurrence
-    compares unrelated gadgets and invents movement that did not happen.
+    Not by bytes alone: sequences such as `pop rbp ; ret` occur many times in
+    one binary, so keying on bytes and comparing an arbitrary occurrence
+    invents movement that did not happen.
     """
-
-    def index(gadgets: list[Gadget]) -> dict[tuple[str, int, bytes], Gadget]:
-        out: dict[tuple[str, int, bytes], Gadget] = {}
-        for g in gadgets:
+    def index(gs):
+        out = {}
+        for g in gs:
             out.setdefault((g.symbol, g.offset, g.raw), g)
         return out
 
     A, B = index(a), index(b)
     shared = set(A) & set(B)
 
-    moved = 0
-    same_address = 0
+    moved = same = 0
     anchored: dict[str, int] = {}
-
     for key in shared:
         ga, gb = A[key], B[key]
         if ga.address == gb.address:
-            same_address += 1
+            same += 1
             sym = ga.symbol or "<no symbol>"
             anchored[sym] = anchored.get(sym, 0) + 1
         else:
             moved += 1
 
-    # Every matched pair shares a symbol and offset by construction, so the
-    # in-function offset is preserved for all of them. What the byte-level view
-    # adds is whether a sequence exists at all in the other variant.
     bytes_a = {g.raw for g in a}
     bytes_b = {g.raw for g in b}
-    surviving_sequences = len(bytes_a & bytes_b)
+    survived = len(bytes_a & bytes_b)
 
     return {
         "gadgets_a": len(a),
@@ -214,26 +250,45 @@ def compare(a: list[Gadget], b: list[Gadget]) -> dict:
         "distinct_a": len(bytes_a),
         "distinct_b": len(bytes_b),
         "matched_gadgets": len(shared),
-        "shared_sequences": surviving_sequences,
-        "survival_rate": round(100 * surviving_sequences / max(1, len(bytes_a)), 1),
+        "shared_sequences": survived,
+        "survival_rate": round(100 * survived / max(1, len(bytes_a)), 1),
         "moved_absolute": moved,
-        "same_absolute_address": same_address,
+        "same_absolute_address": same,
         "relocation_rate": round(100 * moved / max(1, len(shared)), 1),
-        "unmoved_by_function": dict(
-            sorted(anchored.items(), key=lambda kv: -kv[1])
-        ),
+        "unmoved_by_function": dict(sorted(anchored.items(), key=lambda kv: -kv[1])),
+    }
+
+
+def inventory(path: str) -> dict:
+    gs = extract(path)
+    return {
+        "path": path,
+        "gadgets": len(gs),
+        "distinct_sequences": len({g.raw for g in gs}),
+        "with_symbol": sum(1 for g in gs if g.symbol),
     }
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    ap.add_argument("binary_a")
-    ap.add_argument("binary_b")
-    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap = argparse.ArgumentParser(
+        description="Measure gadget survival across diversified variants.")
+    ap.add_argument("binaries", nargs="+")
+    ap.add_argument("--inventory", action="store_true",
+                    help="count gadgets per binary instead of comparing two")
+    ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
-    a, b = extract(args.binary_a), extract(args.binary_b)
-    result = compare(a, b)
+    if args.inventory:
+        results = [inventory(p) for p in args.binaries]
+        print(json.dumps(results, indent=2) if args.json else "\n".join(
+            f"{r['path']}: {r['gadgets']} gadgets "
+            f"({r['distinct_sequences']} distinct)" for r in results))
+        return
+
+    if len(args.binaries) != 2:
+        ap.error("comparison needs exactly two binaries (or use --inventory)")
+
+    result = compare(extract(args.binaries[0]), extract(args.binaries[1]))
 
     if args.json:
         print(json.dumps(result, indent=2))
@@ -249,16 +304,14 @@ def main() -> None:
     print(f"  same address         {result['same_absolute_address']}")
     if result["unmoved_by_function"]:
         print("    these sit in code divcc does not shuffle:")
-        for sym, n in result["unmoved_by_function"].items():
+        for sym, n in list(result["unmoved_by_function"].items())[:8]:
             print(f"      {sym:<28} {n}")
-
     print(
         "\nReading: matched gadgets sit at the same offset inside the same\n"
         "function in both variants -- shuffling relocates whole objects and\n"
         "never touches their contents. So one leaked function pointer lets an\n"
-        "attacker compute every gadget in that object."
+        "attacker compute every gadget in that object.\n"
     )
-    print()
 
 
 if __name__ == "__main__":

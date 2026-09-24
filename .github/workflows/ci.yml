@@ -68,7 +68,10 @@ jobs:
       - name: Install dependencies
         env:
           NYXSTONE_LLVM_PREFIX: /usr/lib/llvm-18
-        run: pip install -r requirements-gadgets.txt
+        run: pip install -r requirements-gadgets.txt pytest
+
+      - name: Unit tests
+        run: python -m pytest tests/ -q
 
       - name: Build two variants
         run: |
@@ -96,3 +99,27 @@ jobs:
           print(f"{d['relocation_rate']}% of matched gadgets relocated")
           print("documented limitation still holds")
           PY
+
+  validate:
+    name: Cross-check against ROPgadget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install LLVM for Nyxstone
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev
+
+      - name: Install dependencies
+        env:
+          NYXSTONE_LLVM_PREFIX: /usr/lib/llvm-18
+        run: pip install -r requirements-gadgets.txt ROPgadget
+
+      # System binaries: x86-64 ELF, compiled by someone else, not by divcc.
+      # This is the only check in the repo that runs against code this project
+      # did not produce, and the only one validated by an outside tool.
+      - name: Validate on system binaries
+        run: |
+          python3 gadgets.py --inventory /usr/bin/ls /bin/bash /usr/bin/ssh
+          python3 validate_against_ropgadget.py /usr/bin/ls /usr/bin/ssh

@@ -30,14 +30,18 @@ from gadgets import extract
 LINE = re.compile(r"^0x([0-9a-fA-F]+)\s*:")
 
 
-def ropgadget_addresses(path: str, depth: int = 5) -> set[int]:
+def ropgadget_addresses(path: str, depth: int = 10) -> set[int]:
     """Every address ROPgadget reports, duplicates included.
 
     --all matters: by default ROPgadget collapses identical gadget strings to a
     single representative address, so most real occurrences never get printed
     and an address-level comparison looks far worse than it is.
 
-    --depth 5 matches this tool's limit of four instructions before the return.
+    --depth is deliberately larger than this tool's own limit of four
+    instructions before the return. ROPgadget bounds how far back it searches
+    by instruction count, so an equal depth makes its set *narrower* than ours
+    near the window edge and reports our valid gadgets as unconfirmed. A larger
+    depth makes its result a superset, which is what a subset check needs.
     """
     proc = subprocess.run(
         ["ROPgadget", "--binary", path, "--depth", str(depth), "--all"],

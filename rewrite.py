@@ -109,7 +109,24 @@ def _vaddr_to_offset(binary, vaddr: int) -> int | None:
     return None
 
 
-def rewrite(in_path: str, out_path: str, seed: int = 0, dry_run: bool = False) -> dict:
+def _func_ranges(binary) -> list[tuple[int, int]]:
+    """(start, end) of every function symbol, for restricting edits to real code."""
+    ranges = []
+    for sym in binary.symbols:
+        is_func = "FUNC" in str(getattr(sym, "type", ""))
+        size = getattr(sym, "size", 0)
+        value = getattr(sym, "value", 0)
+        if is_func and size and value:
+            ranges.append((value, value + size))
+    return ranges
+
+
+def _in_a_function(ranges: list[tuple[int, int]], addr: int, length: int) -> bool:
+    return any(start <= addr and addr + length <= end for start, end in ranges)
+
+
+def rewrite(in_path: str, out_path: str, seed: int = 0, dry_run: bool = False,
+            only: int | None = None, list_only: bool = False) -> dict:
     binary = lief.parse(in_path)
     if binary is None:
         raise SystemExit(f"could not parse {in_path}")
@@ -120,6 +137,7 @@ def rewrite(in_path: str, out_path: str, seed: int = 0, dry_run: bool = False) -
 
     nyx = Nyxstone("x86_64-unknown-none")
     rng = random.Random(seed)
+    func_ranges = _func_ranges(binary)
 
     with open(in_path, "rb") as f:
         data = bytearray(f.read())
@@ -160,6 +178,14 @@ def rewrite(in_path: str, out_path: str, seed: int = 0, dry_run: bool = False) -
             alt = alternate_encoding(orig)
             if alt is None:
                 continue
+
+            # Only touch bytes that lie wholly inside a known function. This
+            # excludes inter-function padding and, more importantly, data that
+            # happens to decode as a valid instruction but is read rather than
+            # executed -- rewriting which changes behaviour without ever
+            # changing an executed instruction.
+            if func_ranges and not _in_a_function(func_ranges, insn.address, len(orig)):
+                continue
             candidates += 1
 
             # First gate: the replacement, decoded on its own, must mean exactly
@@ -172,8 +198,17 @@ def rewrite(in_path: str, out_path: str, seed: int = 0, dry_run: bool = False) -
                 continue
             verified_equivalent += 1
 
-            # Per-device selection.
-            if seed and rng.random() < 0.5:
+            if list_only:
+                print(f"  [{verified_equivalent - 1}] {insn.address:#x}  "
+                      f"{orig.hex():14} {insn.assembly}")
+                continue
+
+            # Diagnostic: apply only the candidate at this index.
+            if only is not None and (verified_equivalent - 1) != only:
+                continue
+
+            # Per-device selection (skipped in single-candidate mode).
+            if only is None and seed and rng.random() < 0.5:
                 continue
 
             rel = insn.address - base
@@ -221,12 +256,21 @@ def main() -> None:
                     help="per-device seed; 0 (default) rewrites every candidate")
     ap.add_argument("--dry-run", action="store_true",
                     help="report what would change without writing")
+    ap.add_argument("--only", type=int, default=None,
+                    help="apply only the candidate at this index (diagnostic)")
+    ap.add_argument("--list", action="store_true", dest="list_only",
+                    help="list verified candidates with address and disassembly")
     args = ap.parse_args()
+
+    if args.list_only:
+        rewrite(args.input, "/dev/null", dry_run=True, list_only=True)
+        return
 
     if not args.dry_run and not args.output:
         ap.error("-o/--output is required unless --dry-run")
 
-    stats = rewrite(args.input, args.output or "/dev/null", args.seed, args.dry_run)
+    stats = rewrite(args.input, args.output or "/dev/null", args.seed,
+                    args.dry_run, args.only)
     print(f"reg-reg candidates          {stats['candidates']}")
     print(f"verified equivalent         {stats['verified_equivalent']}")
     print(f"backed out (desync)         {stats['backed_out']}")

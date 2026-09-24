@@ -143,12 +143,9 @@ jobs:
       - name: Transform unit tests
         run: python -m pytest tests/test_rewrite.py -q
 
-      - name: Rewrite a real binary and prove it still works
+      - name: Rewrite a real binary, and verify every substitution by running it
         run: |
           set -e
-          # A program with plenty of register-to-register arithmetic and
-          # deterministic, input-dependent output -- so a broken rewrite shows
-          # up as a wrong answer, not just a crash.
           cat > sample.c <<'SRC'
           #include <stdio.h>
           #include <stdint.h>
@@ -165,25 +162,42 @@ jobs:
           SRC
           sed -i 's/^          //' sample.c
           gcc -O2 -no-pie -o original sample.c
+          expected="$(./original)"; expected_rc=$?
+          echo "reference output: $expected (rc $expected_rc)"
 
+          echo; echo "candidate instructions:"
+          python3 rewrite.py original --list
+
+          # Every single substitution, applied alone, must leave behaviour
+          # unchanged. This is the ground truth the in-tool checks are trying to
+          # approximate: a substitution that changes output is not equivalent,
+          # whatever its disassembly says.
+          echo; echo "per-substitution execution check:"
+          n=$(python3 rewrite.py original --list | grep -c '^\s*\[')
+          bad=0
+          for i in $(seq 0 $((n-1))); do
+            python3 rewrite.py original -o cand --only "$i" >/dev/null
+            chmod +x cand
+            got="$(./cand)"; rc=$?
+            if [ "$got" = "$expected" ] && [ "$rc" = "$expected_rc" ]; then
+              echo "  [$i] ok"
+            else
+              echo "  [$i] BROKEN: got '$got' (rc $rc)"
+              python3 rewrite.py original --list | grep "^\s*\[$i\]"
+              bad=$((bad+1))
+            fi
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::$bad substitution(s) changed behaviour"; exit 1
+          fi
+
+          echo; echo "all $n substitutions verified equivalent by execution"
           python3 rewrite.py original -o rewritten --seed 1337
           chmod +x rewritten
-
-          echo "byte-level difference:"
-          cmp -l original rewritten | wc -l | xargs echo "  differing bytes:"
-          if cmp -s original rewritten; then
-            echo "::error::rewrite changed nothing"; exit 1
-          fi
-
-          echo "behavioural equivalence:"
-          out_o=$(./original); rc_o=$?
-          out_r=$(./rewritten); rc_r=$?
-          echo "  original : $out_o (rc $rc_o)"
-          echo "  rewritten: $out_r (rc $rc_r)"
-          if [ "$out_o" != "$out_r" ] || [ "$rc_o" != "$rc_r" ]; then
-            echo "::error::rewritten binary does not behave identically"; exit 1
-          fi
-          echo "  identical output and exit code"
+          if cmp -s original rewritten; then echo "::error::nothing changed"; exit 1; fi
+          echo "differing bytes: $(cmp -l original rewritten | wc -l)"
+          [ "$(./rewritten)" = "$expected" ] || { echo "::error::full rewrite differs"; exit 1; }
+          echo "full rewrite: identical output"
 
       - name: Show what the rewrite did to the gadget population
         run: |

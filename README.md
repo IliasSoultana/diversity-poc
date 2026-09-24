@@ -231,17 +231,18 @@ address -- the property divcc could not reach.
 
 ```
 $ python3 rewrite.py original -o rewritten --seed 1337
-reg-reg candidates          29
-verified equivalent         29
-rewritten                   18
+reg-reg candidates          26
+verified equivalent         26
+backed out (desync)         0
+rewritten                   16
 ```
 
-On a small test program CI compiles, rewrites and runs on every push: 29
-candidate instructions, all 29 confirmed equivalent, 18 rewritten under the
-seed, 32 bytes changed -- and the rewritten binary produces identical output and
-the same exit code. That equality is the point of the exercise: an in-place edit
-that gets the encoding wrong produces a wrong answer, not just a crash, and the
-build fails.
+On a small test program CI compiles, rewrites and runs on every push: 26
+candidate instructions inside known functions, 16 rewritten under the seed, 28
+bytes changed -- and the rewritten binary produces identical output. CI does not
+take that on trust: it applies each of the 26 substitutions *individually*, runs
+the binary, and fails unless the output is unchanged. Execution is the ground
+truth an in-tool equivalence check can only approximate.
 
 ### What it deliberately does not do
 
@@ -254,6 +255,20 @@ build fails.
 - **Nothing is trusted unverified.** Every candidate replacement is
   disassembled and checked to mean exactly what the original meant; a transform
   the tool cannot prove equivalent is skipped, not guessed.
+
+### Two things this shook out
+
+The rewriter restricts edits to bytes inside a function symbol's range. An
+earlier version swept the whole `.text`, which risks rewriting data that happens
+to decode as a valid instruction but is read rather than executed -- changing a
+value, not an instruction.
+
+The per-substitution execution check earned its place immediately: the first
+version of the CI harness ran the binary under `bash -e`, and the sample program
+returned a non-zero status by design, so the script aborted on that exit code
+and reported a "behavioural failure" that was entirely in the test, not the
+tool. Verifying by execution is only as good as the harness that does the
+executing.
 
 This is a miniature of what a product like [emproof
 Nyx](https://www.emproof.com/) does at scale -- instruction-level rewriting on a

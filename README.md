@@ -77,47 +77,73 @@ bash demo.sh
 asks the one that decides whether the mitigation is worth anything.
 
 A return-oriented exploit is built from short instruction sequences ending in a
-return. So the real question is what happened to *those*. The tool disassembles
+return. So the real question is what happens to *those*. The tool disassembles
 both variants with [Nyxstone](https://github.com/emproof-com/nyxstone),
-enumerates return-terminated gadgets, matches them between variants by
-`(containing function, offset within it, bytes)`, and reports what changed.
+enumerates gadgets, matches them between variants by `(containing function,
+offset within it, bytes)`, and reports what changed.
+
+### Finding the gadgets
+
+On **fixed-width** targets (AArch64, RISC-V) every instruction starts on a
+4-byte boundary, so one linear sweep sees all of them.
+
+On **x86** an instruction may start at any byte, so a return opcode inside the
+immediate of a longer instruction is still executable by jumping into the
+middle of it. These *unintended* gadgets are invisible to a linear sweep and
+are most of what a real chain is built from:
+
+```
+movabs rbx, 0xc35fc35f      ->  48 bb 5f c3 5f c3 00 00 00 00
+                                      ^^^^^
+                                      pop rdi ; ret
+```
+
+One instruction to a linear decoder; a usable gadget two bytes in. So on x86
+the tool scans for return opcodes and decodes backwards from each, keeping the
+starts that decode cleanly and land exactly on the return.
+
+### Result
 
 ```
 $ python3 gadgets.py node_01 node_02          # x86-64, Linux
 
-Gadgets found      17 / 17   (12 / 12 distinct sequences)
-Byte sequences present in both   11 (91.7% of variant A) -- none were destroyed
+Gadgets found      32 / 34   (31 / 33 distinct sequences)
+Byte sequences present in both   30 (96.8% of variant A)
 
-Gadgets matched by function and offset   16
-  relocated            7 (43.8%)
-  same address         9
+Gadgets matched by function and offset   27
+  relocated            7 (25.9%)
+  same address         20
     these sit in code divcc does not shuffle:
-      do_global_dtors_aux          5
-      register_tm_clones           2
-      deregister_tm_clones         2
+      do_global_dtors_aux          10
+      register_tm_clones           6
+      deregister_tm_clones         4
 ```
 
-Three things fall out, and none of them flatter the technique:
+Four things fall out, and none of them flatter the technique:
 
-**No gadget is destroyed.** Shuffling link order does not rewrite instructions,
-so every sequence that existed before still exists afterwards. The technique
-relocates an attacker's building blocks; it does not remove them.
+**Almost nothing is destroyed.** 96.8% of sequences exist in both variants.
+Shuffling relocates an attacker's building blocks rather than removing them.
+The missing few are unintended gadgets that appear or vanish at object
+boundaries as alignment padding shifts -- a side effect, not a defence.
 
-**Matched gadgets keep their offset inside their own function.** That is true by
-construction -- objects move as units -- and it is the limitation that matters.
-An attacker who leaks a single pointer into an object can compute every gadget
-in it. Diversification costs them one info leak, not an exploit.
+**Matched gadgets keep their offset inside their own function.** True by
+construction, since objects move as units, and it is the limitation that
+matters: an attacker who leaks one pointer into an object can compute every
+gadget in it. Diversification costs them one info leak, not an exploit.
 
-**On x86-64, more than half the gadgets never move at all.** Every unmoved one
-sits in C runtime startup code that the compiler driver links in: `crt` object
-files a source-level wrapper never sees. A tool that works on the finished
-binary reaches them; one that wraps the compiler cannot. On AArch64 the same
-measurement reports 100% relocation, because that startup code does not
-contribute return-terminated gadgets to the text section there.
+**On x86-64 roughly three quarters never move at all.** Every unmoved one sits
+in C runtime startup code the compiler driver links in -- `crt` objects a
+source-level wrapper never sees. A tool that rewrites the finished binary
+reaches them; one that wraps the compiler cannot.
+
+**Counting properly makes it worse.** Before unaligned decoding was
+implemented, the same comparison reported 17 gadgets and 43.8% relocation. With
+the unintended gadgets included it is 32 and 25.9%. The naive measurement
+flattered the tool by roughly a factor of two.
 
 That last point is the honest argument against this whole approach, and it is
-why production systems apply diversity at instruction level on the linked
-image rather than by reordering objects.
+why production systems apply diversity at instruction level on the linked image
+rather than by reordering objects.
 
 ### A bug this found
 
@@ -127,12 +153,42 @@ through the symbol table. The measurement showed `main` holding gadgets that
 never moved, which is the opposite of the point. Every object now takes part in
 the shuffle.
 
-### Running it
+### Validation
 
-`gadgets.py` needs two libraries the rest of the repo does not:
+Measuring only your own toy program proves very little, so `gadgets.py` also
+runs against binaries this project did not build, checked two ways:
+
+```
+$ python3 validate_against_ropgadget.py /usr/bin/ls /usr/bin/ssh
+
+/usr/bin/ls
+  reported                1778
+  self-consistent         1778
+  no false positives
+  also found by ROPgadget 1570 of 1778 (88.3%)
+```
+
+**Self-consistency** is the hard check and needs no reference tool: every
+reported gadget must re-decode to exactly its own bytes and end in a return. A
+tool cannot fake that. Zero failures across `ls`, `ssh` and `bash`.
+
+**Agreement with [ROPgadget](https://github.com/JonathanSalwan/ROPgadget)** is
+measured but not treated as an oracle. ROPgadget filters `ret imm16` encodings
+and some odd sequences from unaligned decodes; this tool does not. So the ~12%
+residual is a policy difference, not a defect, and only a large drop would
+signal a real divergence.
+
+Getting that comparison right took three attempts, which is itself the lesson:
+at first ROPgadget deduplicates identical gadget strings unless `--all` is
+passed (18.8% agreement), and then it bounds its backward search by instruction
+depth, so at equal depth its set is narrower than ours near the window edge
+(49.8%). Only with `--all` and a larger depth is it a genuine superset (88.3%).
+
+### Running it
 
 ```
 pip install -r requirements-gadgets.txt
+python3 -m pytest tests/ -q
 ```
 
 Nyxstone builds against a system LLVM between versions 15 and 20:
@@ -150,17 +206,15 @@ export LDFLAGS="-L$(brew --prefix zstd)/lib" CXXFLAGS="-std=c++17"
 
 ### Limitations of the measurement
 
-- **Linear sweep.** Instructions are decoded sequentially from the start of the
-  text section. On AArch64 and RISC-V, with fixed-width instructions, that sees
-  everything. On x86 it undercounts badly: many real gadgets appear only when
-  decoding starts at an unaligned offset inside another instruction.
 - **Returns only.** Sequences ending in an indirect jump or call are not
-  counted, so the true gadget population is larger than reported.
+  counted, so the real gadget population is larger than reported.
+- **Four instructions, twenty bytes.** Longer gadgets exist and are excluded.
 - **Symbol-relative attribution.** Gadgets are assigned to the nearest preceding
-  symbol. In a stripped binary there is nothing to anchor to and the comparison
-  degrades to byte-level only.
-- **A toy program.** Nine functions in one translation unit each. The
-  proportions here should not be read as typical of real firmware.
+  symbol; in a stripped binary there is nothing to anchor to and the comparison
+  degrades to byte level.
+- **A toy program.** Nine functions of one line each. The proportions here
+  should not be read as typical of real firmware -- which is exactly why the
+  validation runs against system binaries instead.
 
 ## What this does not protect against
 

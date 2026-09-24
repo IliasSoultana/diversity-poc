@@ -39,12 +39,14 @@ def main() -> None:
     src_dir = Path(args[0])
     out_file = args[-1]
 
-    # Collect .c files — main.c is always linked last so _main resolves cleanly
+    # Every object takes part in the shuffle, main.c included. An earlier
+    # version pinned main.c last; gadgets.py showed the consequence, which was
+    # that main kept the same address in every variant and its gadgets with it.
+    # The pin was never necessary: the linker resolves the entry point through
+    # the symbol table, not through link order.
     sources = sorted(src_dir.glob("*.c"))
-    non_main = [s for s in sources if s.name != "main.c"]
-    main_src = [s for s in sources if s.name == "main.c"]
 
-    if not main_src:
+    if not any(s.name == "main.c" for s in sources):
         print("error: main.c not found in", src_dir)
         sys.exit(1)
 
@@ -62,9 +64,8 @@ def main() -> None:
             obj_map[src] = obj
 
         rng = random.Random(seed)
-        shuffled = non_main[:]
-        rng.shuffle(shuffled)
-        link_order = shuffled + main_src
+        link_order = sources[:]
+        rng.shuffle(link_order)
 
         print(f"  seed {seed:#06x} → link order: {[s.stem for s in link_order]}")
 

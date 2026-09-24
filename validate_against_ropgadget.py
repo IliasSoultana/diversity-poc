@@ -82,8 +82,12 @@ def main() -> None:
         print(f"  not confirmed           {len(unconfirmed)}")
 
         if unconfirmed:
-            print("  unconfirmed addresses (first 5):",
-                  ", ".join(hex(a) for a in sorted(unconfirmed)[:5]))
+            by_addr = {g.address: g for g in extract(path)}
+            print("  unconfirmed gadgets (first 10):")
+            for addr in sorted(unconfirmed)[:10]:
+                g = by_addr.get(addr)
+                if g:
+                    print(f"    {addr:#x}  {g.raw.hex():<28} {g.text}")
 
         # ROPgadget applies its own filters, so a small unconfirmed remainder is
         # expected. A large one means we are inventing gadgets.

@@ -77,40 +77,59 @@ bash demo.sh
 asks the one that decides whether the mitigation is worth anything.
 
 A return-oriented exploit is built from short instruction sequences ending in a
-return. So the question is not whether functions moved, but what happened to
-those sequences. The tool disassembles both variants with
-[Nyxstone](https://github.com/emproof-com/nyxstone), enumerates gadgets, and
-compares them three ways:
+return. So the real question is what happened to *those*. The tool disassembles
+both variants with [Nyxstone](https://github.com/emproof-com/nyxstone),
+enumerates return-terminated gadgets, matches them between variants by
+`(containing function, offset within it, bytes)`, and reports what changed.
 
 ```
-$ python3 gadgets.py node_01 node_02
+$ python3 gadgets.py node_01 node_02          # x86-64, Linux
 
-Gadgets found      16 / 16   (10 / 10 distinct sequences)
-Survived the shuffle   10 sequences (100.0% of variant A)
-  at a new address     10
-  at the same address  0
+Gadgets found      17 / 17   (12 / 12 distinct sequences)
+Byte sequences present in both   11 (91.7% of variant A) -- none were destroyed
 
-Same offset inside the same function   10 (100.0%)
-Different offset                       0
+Gadgets matched by function and offset   16
+  relocated            7 (43.8%)
+  same address         9
+    these sit in code divcc does not shuffle:
+      do_global_dtors_aux          5
+      register_tm_clones           2
+      deregister_tm_clones         2
 ```
 
-Read that carefully, because it is not a flattering result:
+Three things fall out, and none of them flatter the technique:
 
-| Measurement | Result | What it means |
-|---|---|---|
-| Gadget count | identical | Shuffling link order neither adds nor removes code |
-| Byte sequences surviving | **100%** | Every gadget still exists; none were destroyed |
-| Moved to a new address | **100%** | An exploit with hardcoded addresses does break |
-| Same offset within its function | **100%** | One leaked function pointer recovers every gadget in that object |
+**No gadget is destroyed.** Shuffling link order does not rewrite instructions,
+so every sequence that existed before still exists afterwards. The technique
+relocates an attacker's building blocks; it does not remove them.
 
-So link-order diversification defeats an attacker who hardcodes addresses, and
-costs an attacker who has any info-leak primitive exactly one leak. That is a
-real but narrow benefit, and it is the honest case for why production systems
-do the work at instruction level rather than at link level.
+**Matched gadgets keep their offset inside their own function.** That is true by
+construction -- objects move as units -- and it is the limitation that matters.
+An attacker who leaks a single pointer into an object can compute every gadget
+in it. Diversification costs them one info leak, not an exploit.
+
+**On x86-64, more than half the gadgets never move at all.** Every unmoved one
+sits in C runtime startup code that the compiler driver links in: `crt` object
+files a source-level wrapper never sees. A tool that works on the finished
+binary reaches them; one that wraps the compiler cannot. On AArch64 the same
+measurement reports 100% relocation, because that startup code does not
+contribute return-terminated gadgets to the text section there.
+
+That last point is the honest argument against this whole approach, and it is
+why production systems apply diversity at instruction level on the linked
+image rather than by reordering objects.
+
+### A bug this found
+
+`divcc` originally pinned `main.c` last in every variant, with a comment
+claiming the entry point needed it. It did not -- the linker resolves the entry
+through the symbol table. The measurement showed `main` holding gadgets that
+never moved, which is the opposite of the point. Every object now takes part in
+the shuffle.
 
 ### Running it
 
-`gadgets.py` needs two libraries that the rest of the repo does not:
+`gadgets.py` needs two libraries the rest of the repo does not:
 
 ```
 pip install -r requirements-gadgets.txt
@@ -132,14 +151,16 @@ export LDFLAGS="-L$(brew --prefix zstd)/lib" CXXFLAGS="-std=c++17"
 ### Limitations of the measurement
 
 - **Linear sweep.** Instructions are decoded sequentially from the start of the
-  text section. On AArch64 and RISC-V, where instructions are fixed width, that
-  sees everything. On x86 it undercounts: many real gadgets only appear when
+  text section. On AArch64 and RISC-V, with fixed-width instructions, that sees
+  everything. On x86 it undercounts badly: many real gadgets appear only when
   decoding starts at an unaligned offset inside another instruction.
-- **Returns only.** Gadgets ending in an indirect jump or call are not counted,
-  so the true gadget population is larger than reported.
-- **Gadgets are attributed to the nearest preceding symbol.** With a stripped
-  binary, or across a section with no symbols, the offset comparison has
-  nothing to anchor to and is skipped.
+- **Returns only.** Sequences ending in an indirect jump or call are not
+  counted, so the true gadget population is larger than reported.
+- **Symbol-relative attribution.** Gadgets are assigned to the nearest preceding
+  symbol. In a stripped binary there is nothing to anchor to and the comparison
+  degrades to byte-level only.
+- **A toy program.** Nine functions in one translation unit each. The
+  proportions here should not be read as typical of real firmware.
 
 ## What this does not protect against
 

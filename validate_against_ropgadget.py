@@ -30,9 +30,17 @@ from gadgets import extract
 LINE = re.compile(r"^0x([0-9a-fA-F]+)\s*:")
 
 
-def ropgadget_addresses(path: str, depth: int = 6) -> set[int]:
+def ropgadget_addresses(path: str, depth: int = 5) -> set[int]:
+    """Every address ROPgadget reports, duplicates included.
+
+    --all matters: by default ROPgadget collapses identical gadget strings to a
+    single representative address, so most real occurrences never get printed
+    and an address-level comparison looks far worse than it is.
+
+    --depth 5 matches this tool's limit of four instructions before the return.
+    """
     proc = subprocess.run(
-        ["ROPgadget", "--binary", path, "--depth", str(depth)],
+        ["ROPgadget", "--binary", path, "--depth", str(depth), "--all"],
         capture_output=True, text=True,
     )
     if proc.returncode != 0:

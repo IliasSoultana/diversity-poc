@@ -216,6 +216,50 @@ export LDFLAGS="-L$(brew --prefix zstd)/lib" CXXFLAGS="-std=c++17"
   should not be read as typical of real firmware -- which is exactly why the
   validation runs against system binaries instead.
 
+## Rewriting the finished binary
+
+The measurement above is an argument against link-order shuffling: it relocates
+whole objects, so gadget *bodies* survive byte-identical. `rewrite.py` does the
+thing that argument points to instead -- it edits the linked binary directly,
+with no source and no recompilation.
+
+x86-64 encodes every register-to-register ALU instruction two ways. `mov rax,
+rbx` is either `48 89 d8` (opcode `0x89`, destination in r/m) or `48 8b c3`
+(opcode `0x8b`, destination in reg). Same length, same effect, different bytes.
+Swapping between them changes the contents of a function rather than just its
+address -- the property divcc could not reach.
+
+```
+$ python3 rewrite.py original -o rewritten --seed 1337
+reg-reg candidates          29
+verified equivalent         29
+rewritten                   18
+```
+
+On a small test program CI compiles, rewrites and runs on every push: 29
+candidate instructions, all 29 confirmed equivalent, 18 rewritten under the
+seed, 32 bytes changed -- and the rewritten binary produces identical output and
+the same exit code. That equality is the point of the exercise: an in-place edit
+that gets the encoding wrong produces a wrong answer, not just a crash, and the
+build fails.
+
+### What it deliberately does not do
+
+- **Same-length substitutions only.** Changing an instruction's length would
+  shift everything after it and require relocating every address that refers
+  past the edit. That is the hard part of real binary rewriting, and it is out
+  of scope here.
+- **Register-to-register ALU ops only** (`mov`, `add`, `sub`, `and`, `or`,
+  `xor`, `cmp`) -- the instructions with a clean dual encoding.
+- **Nothing is trusted unverified.** Every candidate replacement is
+  disassembled and checked to mean exactly what the original meant; a transform
+  the tool cannot prove equivalent is skipped, not guessed.
+
+This is a miniature of what a product like [emproof
+Nyx](https://www.emproof.com/) does at scale -- instruction-level rewriting on a
+compiled image -- reduced to the one substitution that can be made provably safe
+in a weekend.
+
 ## What this does not protect against
 
 Link-order shuffling is the coarsest form of software diversity, and it is

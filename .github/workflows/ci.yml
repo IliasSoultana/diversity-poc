@@ -53,3 +53,47 @@ jobs:
             exit 1
           fi
           echo "same seed reproduces the same layout"
+
+  gadgets:
+    name: Gadget survival measurement
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install LLVM for Nyxstone
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev
+
+      - name: Install dependencies
+        env:
+          NYXSTONE_LLVM_PREFIX: /usr/lib/llvm-18
+        run: pip install -r requirements-gadgets.txt
+
+      - name: Build two variants
+        run: |
+          VARIANT_SEED=0xb2e1 python3 divcc src/ -o node_01
+          VARIANT_SEED=0x61a7 python3 divcc src/ -o node_02
+
+      # This step asserts a weakness, not a strength. Link-order shuffling
+      # relocates objects without touching their contents, so every gadget
+      # should survive and keep its offset inside its own function. If that
+      # ever stops being true, the README's honesty section is out of date.
+      - name: Measure and check the documented limitation
+        run: |
+          set -e
+          python3 gadgets.py node_01 node_02
+          python3 gadgets.py node_01 node_02 --json > gadgets.json
+          cat gadgets.json
+          python3 - <<'PY'
+          import json, sys
+          d = json.load(open("gadgets.json"))
+          if d["survival_rate"] < 90:
+              sys.exit(f"::error::only {d['survival_rate']}% of gadgets survived; "
+                       "README claims shuffling destroys none")
+          rate = d["offset_preservation_rate"]
+          if rate is not None and rate < 90:
+              sys.exit(f"::error::only {rate}% of gadgets kept their in-function "
+                       "offset; the documented limitation no longer holds")
+          print("documented limitation still holds")
+          PY

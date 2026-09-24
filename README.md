@@ -71,6 +71,76 @@ bash demo.sh
 | `demo.sh` | Builds two nodes and runs the comparison |
 | `src/` | Demo firmware split into one file per function |
 
+## Measuring what it actually costs an attacker
+
+`compare.py` answers the easy question -- did the functions move. `gadgets.py`
+asks the one that decides whether the mitigation is worth anything.
+
+A return-oriented exploit is built from short instruction sequences ending in a
+return. So the question is not whether functions moved, but what happened to
+those sequences. The tool disassembles both variants with
+[Nyxstone](https://github.com/emproof-com/nyxstone), enumerates gadgets, and
+compares them three ways:
+
+```
+$ python3 gadgets.py node_01 node_02
+
+Gadgets found      16 / 16   (10 / 10 distinct sequences)
+Survived the shuffle   10 sequences (100.0% of variant A)
+  at a new address     10
+  at the same address  0
+
+Same offset inside the same function   10 (100.0%)
+Different offset                       0
+```
+
+Read that carefully, because it is not a flattering result:
+
+| Measurement | Result | What it means |
+|---|---|---|
+| Gadget count | identical | Shuffling link order neither adds nor removes code |
+| Byte sequences surviving | **100%** | Every gadget still exists; none were destroyed |
+| Moved to a new address | **100%** | An exploit with hardcoded addresses does break |
+| Same offset within its function | **100%** | One leaked function pointer recovers every gadget in that object |
+
+So link-order diversification defeats an attacker who hardcodes addresses, and
+costs an attacker who has any info-leak primitive exactly one leak. That is a
+real but narrow benefit, and it is the honest case for why production systems
+do the work at instruction level rather than at link level.
+
+### Running it
+
+`gadgets.py` needs two libraries that the rest of the repo does not:
+
+```
+pip install -r requirements-gadgets.txt
+```
+
+Nyxstone builds against a system LLVM between versions 15 and 20:
+
+```
+# Debian/Ubuntu
+sudo apt install llvm-18-dev
+export NYXSTONE_LLVM_PREFIX=/usr/lib/llvm-18
+
+# macOS
+brew install llvm@19 zstd
+export NYXSTONE_LLVM_PREFIX="$(brew --prefix llvm@19)"
+export LDFLAGS="-L$(brew --prefix zstd)/lib" CXXFLAGS="-std=c++17"
+```
+
+### Limitations of the measurement
+
+- **Linear sweep.** Instructions are decoded sequentially from the start of the
+  text section. On AArch64 and RISC-V, where instructions are fixed width, that
+  sees everything. On x86 it undercounts: many real gadgets only appear when
+  decoding starts at an unaligned offset inside another instruction.
+- **Returns only.** Gadgets ending in an indirect jump or call are not counted,
+  so the true gadget population is larger than reported.
+- **Gadgets are attributed to the nearest preceding symbol.** With a stripped
+  binary, or across a section with no symbols, the offset comparison has
+  nothing to anchor to and is skipped.
+
 ## What this does not protect against
 
 Link-order shuffling is the coarsest form of software diversity, and it is

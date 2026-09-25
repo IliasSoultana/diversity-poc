@@ -3,7 +3,7 @@
 Cross-check gadgets.py against ROPgadget on binaries neither tool's author built.
 
 A gadget finder that only ever runs on your own toy program proves very little.
-This points both this tool and ROPgadget -- an established, widely used finder --
+This points both this tool and ROPgadget, an established, widely used finder --
 at the same system binaries and asks one question:
 
     is every gadget we report also reported by ROPgadget?

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-compare.py — show function address differences between two diversified builds.
+compare.py: show function address differences between two diversified builds.
 
 Usage:
     python compare.py <binary1> <binary2>

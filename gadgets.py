@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-gadgets.py — measure what link-order diversification actually costs an attacker.
+gadgets.py: measure what link-order diversification actually costs an attacker.
 
 compare.py answers "did the functions move".  That is the easy question, and
 the flattering one.  This asks the harder one: a return-oriented exploit is
@@ -19,7 +19,7 @@ How gadgets are found depends on the instruction encoding:
 
   Variable-width ISAs (x86, x86-64).  An instruction may start at any byte, so
   a return opcode sitting inside the immediate or displacement of a longer
-  instruction is still a real, executable return -- reachable by jumping into
+  instruction is still a real, executable return, reachable by jumping into
   the middle of that instruction.  A linear sweep never reports those, and on
   x86 they are the majority of what a ROP chain is built from.  So we scan for
   return opcodes and try decoding backwards from each one, keeping the starts
@@ -297,7 +297,7 @@ def main() -> None:
     print(f"\nGadgets found      {result['gadgets_a']} / {result['gadgets_b']}"
           f"   ({result['distinct_a']} / {result['distinct_b']} distinct sequences)")
     print(f"Byte sequences present in both   {result['shared_sequences']} "
-          f"({result['survival_rate']}% of variant A) -- none were destroyed")
+          f"({result['survival_rate']}% of variant A), none were destroyed")
     print(f"\nGadgets matched by function and offset   {result['matched_gadgets']}")
     print(f"  relocated            {result['moved_absolute']} "
           f"({result['relocation_rate']}%)")
@@ -308,7 +308,7 @@ def main() -> None:
             print(f"      {sym:<28} {n}")
     print(
         "\nReading: matched gadgets sit at the same offset inside the same\n"
-        "function in both variants -- shuffling relocates whole objects and\n"
+        "function in both variants, shuffling relocates whole objects and\n"
         "never touches their contents. So one leaked function pointer lets an\n"
         "attacker compute every gadget in that object.\n"
     )

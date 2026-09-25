@@ -4,7 +4,7 @@
 
 A proof-of-concept demonstrating compiler-level software diversity.
 
-Each build is **functionally identical** — same source, same output — but
+Each build is **functionally identical** (same source, same output), but
 structurally unique at the binary level.  An exploit crafted for one node is
 useless against every other node.
 
@@ -66,14 +66,14 @@ bash demo.sh
 
 | File | Purpose |
 |---|---|
-| `divcc` | Compiler wrapper — reads `VARIANT_SEED`, shuffles link order |
+| `divcc` | Compiler wrapper, reads `VARIANT_SEED`, shuffles link order |
 | `compare.py` | Compares function addresses between two builds |
 | `demo.sh` | Builds two nodes and runs the comparison |
 | `src/` | Demo firmware split into one file per function |
 
 ## Measuring what it actually costs an attacker
 
-`compare.py` answers the easy question -- did the functions move. `gadgets.py`
+`compare.py` answers the easy question: did the functions move. `gadgets.py`
 asks the one that decides whether the mitigation is worth anything.
 
 A return-oriented exploit is built from short instruction sequences ending in a
@@ -124,7 +124,7 @@ Four things fall out, and none of them flatter the technique:
 **Almost nothing is destroyed.** 96.8% of sequences exist in both variants.
 Shuffling relocates an attacker's building blocks rather than removing them.
 The missing few are unintended gadgets that appear or vanish at object
-boundaries as alignment padding shifts -- a side effect, not a defence.
+boundaries as alignment padding shifts. That is a side effect, not a defence.
 
 **Matched gadgets keep their offset inside their own function.** True by
 construction, since objects move as units, and it is the limitation that
@@ -132,7 +132,7 @@ matters: an attacker who leaks one pointer into an object can compute every
 gadget in it. Diversification costs them one info leak, not an exploit.
 
 **On x86-64 roughly three quarters never move at all.** Every unmoved one sits
-in C runtime startup code the compiler driver links in -- `crt` objects a
+in C runtime startup code the compiler driver links in, `crt` objects a
 source-level wrapper never sees. A tool that rewrites the finished binary
 reaches them; one that wraps the compiler cannot.
 
@@ -148,7 +148,7 @@ rather than by reordering objects.
 ### A bug this found
 
 `divcc` originally pinned `main.c` last in every variant, with a comment
-claiming the entry point needed it. It did not -- the linker resolves the entry
+claiming the entry point needed it. It does not; the linker resolves the entry
 through the symbol table. The measurement showed `main` holding gadgets that
 never moved, which is the opposite of the point. Every object now takes part in
 the shuffle.
@@ -213,21 +213,21 @@ export LDFLAGS="-L$(brew --prefix zstd)/lib" CXXFLAGS="-std=c++17"
   symbol; in a stripped binary there is nothing to anchor to and the comparison
   degrades to byte level.
 - **A toy program.** Nine functions of one line each. The proportions here
-  should not be read as typical of real firmware -- which is exactly why the
+  should not be read as typical of real firmware, which is exactly why the
   validation runs against system binaries instead.
 
 ## Rewriting the finished binary
 
 The measurement above is an argument against link-order shuffling: it relocates
 whole objects, so gadget *bodies* survive byte-identical. `rewrite.py` does the
-thing that argument points to instead -- it edits the linked binary directly,
+thing that argument points to instead: it edits the linked binary directly,
 with no source and no recompilation.
 
 x86-64 encodes every register-to-register ALU instruction two ways. `mov rax,
 rbx` is either `48 89 d8` (opcode `0x89`, destination in r/m) or `48 8b c3`
 (opcode `0x8b`, destination in reg). Same length, same effect, different bytes.
 Swapping between them changes the contents of a function rather than just its
-address -- the property divcc could not reach.
+address. That is the property divcc could not reach.
 
 ```
 $ python3 rewrite.py original -o rewritten --seed 1337
@@ -239,7 +239,7 @@ rewritten                   16
 
 On a small test program CI compiles, rewrites and runs on every push: 26
 candidate instructions inside known functions, 16 rewritten under the seed, 28
-bytes changed -- and the rewritten binary produces identical output. CI does not
+bytes changed, and the rewritten binary produces identical output. CI does not
 take that on trust: it applies each of the 26 substitutions *individually*, runs
 the binary, and fails unless the output is unchanged. Execution is the ground
 truth an in-tool equivalence check can only approximate.
@@ -251,7 +251,7 @@ truth an in-tool equivalence check can only approximate.
   past the edit. That is the hard part of real binary rewriting, and it is out
   of scope here.
 - **Register-to-register ALU ops only** (`mov`, `add`, `sub`, `and`, `or`,
-  `xor`, `cmp`) -- the instructions with a clean dual encoding.
+  `xor`, `cmp`), the instructions with a clean dual encoding.
 - **Nothing is trusted unverified.** Every candidate replacement is
   disassembled and checked to mean exactly what the original meant; a transform
   the tool cannot prove equivalent is skipped, not guessed.
@@ -260,7 +260,7 @@ truth an in-tool equivalence check can only approximate.
 
 The rewriter restricts edits to bytes inside a function symbol's range. An
 earlier version swept the whole `.text`, which risks rewriting data that happens
-to decode as a valid instruction but is read rather than executed -- changing a
+to decode as a valid instruction but is read rather than executed. Rewriting it changes a
 value, not an instruction.
 
 The per-substitution execution check earned its place immediately: the first
@@ -271,8 +271,8 @@ tool. Verifying by execution is only as good as the harness that does the
 executing.
 
 This is a miniature of what a product like [emproof
-Nyx](https://www.emproof.com/) does at scale -- instruction-level rewriting on a
-compiled image -- reduced to the one substitution that can be made provably safe
+Nyx](https://www.emproof.com/) does at scale: instruction-level rewriting on a
+compiled image, reduced to the one substitution that can be made provably safe
 in a weekend.
 
 ## What this does not protect against
@@ -288,17 +288,17 @@ worth being precise about where it stops helping:
   knowing the layout. A single info-leak primitive that discloses a function
   pointer re-anchors the rest, and diversity buys nothing further.
 - **It does not touch control flow, constants or data layout.** Signatures
-  used for reverse engineering — string tables, magic values, call graph
-  shape — are unchanged, so identifying the firmware is no harder.
+  used for reverse engineering, string tables, magic values, call graph
+  shape, are unchanged, so identifying the firmware is no harder.
 - **Nothing is hardened.** This changes where code sits, not whether it is
   exploitable. A buffer overflow remains a buffer overflow.
 - **It needs the source.** This acts inside the toolchain, so it cannot be
-  applied to a vendored blob or a binary you cannot rebuild — which is
+  applied to a vendored blob or a binary you cannot rebuild, which is
   precisely the case in much of the embedded supply chain.
 
 Production systems layer finer-grained techniques on top: instruction
 scheduling variation, register allocation randomisation, dead-code insertion
-and padding, randomised stack frame layout — and, where source is unavailable,
+and padding, randomised stack frame layout, and, where source is unavailable,
 binary rewriting rather than a compiler wrapper.
 
 The principle demonstrated here is the same: same source, unique binary,

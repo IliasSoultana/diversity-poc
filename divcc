@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-divcc — diversity compiler wrapper
+divcc: a diversity compiler wrapper
 
 Produces seed-unique binaries by compiling each source file in src/ to its own
 object file, then linking them in a seed-determined random order.  The linker
 places object files sequentially in the text segment, so a different link order
 means every function lands at a different address.
 
-Every build is functionally identical — same source, same behaviour — but each
-seed produces a different internal layout so an exploit crafted for one binary
-does not transfer to another.
+Every build is functionally identical (same source, same behaviour). Only the
+internal layout differs, so an exploit crafted against one binary does not
+transfer to another.
 
 Usage:
     VARIANT_SEED=0xb2e1  python3 divcc src/ -o node_01

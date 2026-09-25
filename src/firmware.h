@@ -1,4 +1,4 @@
-/* firmware.h — shared declarations for the demo firmware */
+/* firmware.h, shared declarations for the demo firmware */
 #pragma once
 #include <stdio.h>
 

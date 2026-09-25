@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-rewrite.py — instruction-level diversification on a finished binary.
+rewrite.py: instruction-level diversification on a finished binary.
 
-divcc reorders whole object files, so gadget bodies survive untouched -- the
+divcc reorders whole object files, so gadget bodies survive untouched, the
 measurement in gadgets.py shows exactly that. This does the thing that measurement
 argued for instead: it edits the linked binary directly, with no source and no
 recompilation, swapping individual instructions for equal-length encodings that
@@ -18,7 +18,7 @@ Scope, stated plainly:
 
   * Same-length substitutions only. Changing an instruction's length would move
     everything after it and require relocating every address that refers past
-    the edit -- a different and much larger problem. Nyx does that; this does
+    the edit, a different and much larger problem. Nyx does that; this does
     not.
 
   * Register-to-register ALU ops only (mov, add, sub, and, or, xor, cmp). These
@@ -182,7 +182,7 @@ def rewrite(in_path: str, out_path: str, seed: int = 0, dry_run: bool = False,
             # Only touch bytes that lie wholly inside a known function. This
             # excludes inter-function padding and, more importantly, data that
             # happens to decode as a valid instruction but is read rather than
-            # executed -- rewriting which changes behaviour without ever
+            # executed, rewriting which changes behaviour without ever
             # changing an executed instruction.
             if func_ranges and not _in_a_function(func_ranges, insn.address, len(orig)):
                 continue
@@ -217,7 +217,7 @@ def rewrite(in_path: str, out_path: str, seed: int = 0, dry_run: bool = False,
 
             # Second gate, the one the isolated check cannot give: apply the edit
             # and require the WHOLE section to still decode to the identical
-            # instruction sequence. A linear-sweep desync -- bytes that looked
+            # instruction sequence. A linear-sweep desync, bytes that looked
             # like a standalone instruction but are not one in the real stream --
             # shifts later boundaries and fails here, so it is backed out rather
             # than silently corrupting the binary.

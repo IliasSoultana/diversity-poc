@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# demo.sh — build the firmware twice with different seeds, then compare layouts.
+# demo.sh: build the firmware twice with different seeds, then compare layouts.
 set -e
 
 echo "=== diversity-poc demo ==="

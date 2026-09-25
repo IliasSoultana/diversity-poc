@@ -30,7 +30,7 @@ def x86():
 
 @pytest.fixture(scope="module")
 def hidden_gadget(x86):
-    """`movabs rbx, 0xc35fc35f` — the immediate contains 5f c3 = pop rdi ; ret.
+    """`movabs rbx, 0xc35fc35f`, the immediate contains 5f c3 = pop rdi ; ret.
 
     One instruction when decoded from its own start. Two usable gadgets when
     decoded from inside it.
